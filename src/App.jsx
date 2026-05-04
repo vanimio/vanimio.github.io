@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import {
   ChevronLeft, Play, Pause, SkipForward, RotateCcw, Clock,
   ChevronRight, Check, Flame, X, Volume2, VolumeX, Search,
-  Plus, Shuffle, Trash2
+  Plus, Shuffle, Trash2, SlidersHorizontal, Sparkles, RefreshCw
 } from 'lucide-react';
 
 // ====================================================================
@@ -620,11 +620,71 @@ function playBeep(freq = 880, duration = 180, volume = 0.25) {
   } catch (e) {}
 }
 
+// Auto-balance: when one slider changes, rescale the others so total stays 100.
+function rebalanceWeights(weights, changedKey, newValue) {
+  newValue = Math.max(0, Math.min(100, newValue));
+  const keys = Object.keys(weights);
+  const others = keys.filter((k) => k !== changedKey);
+  const otherSum = others.reduce((s, k) => s + weights[k], 0);
+  const target = 100 - newValue;
+  const result = { ...weights, [changedKey]: newValue };
+  if (otherSum < 0.01) {
+    // all others are 0 — distribute evenly
+    const each = target / others.length;
+    others.forEach((k) => { result[k] = each; });
+  } else {
+    const factor = target / otherSum;
+    others.forEach((k) => { result[k] = weights[k] * factor; });
+  }
+  return result;
+}
+
+// Build a randomized session: pick `total` exercises distributed by weight.
+function generateMix(weights, total) {
+  // 1) integer counts per group via floor + largest-remainder
+  const raw = {};
+  const floors = {};
+  let assigned = 0;
+  for (const g of muscleGroups) {
+    const w = weights[g.id] || 0;
+    raw[g.id] = (w * total) / 100;
+    floors[g.id] = Math.floor(raw[g.id]);
+    assigned += floors[g.id];
+  }
+  let remaining = total - assigned;
+  if (remaining > 0) {
+    const sorted = muscleGroups
+      .map((g) => ({ id: g.id, frac: raw[g.id] - floors[g.id] }))
+      .sort((a, b) => b.frac - a.frac);
+    for (let i = 0; i < remaining && i < sorted.length; i++) {
+      floors[sorted[i].id] += 1;
+    }
+  }
+  // 2) pick random exercises from each group, capped at group size
+  const picked = [];
+  for (const g of muscleGroups) {
+    const need = floors[g.id];
+    if (!need) continue;
+    const pool = [...g.exercises];
+    for (let i = pool.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [pool[i], pool[j]] = [pool[j], pool[i]];
+    }
+    picked.push(...pool.slice(0, Math.min(need, pool.length)));
+  }
+  // 3) shuffle final order so groups aren't clumped
+  for (let i = picked.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [picked[i], picked[j]] = [picked[j], picked[i]];
+  }
+  return picked;
+}
+
 // ====================================================================
 // HOME SCREEN
 // ====================================================================
 
-function HomeScreen({ onSelectGroup, onFreeTraining }) {
+function HomeScreen({ onSelectGroup, onFreeTraining, onRandomMix }) {
   const greet = (() => {
     const h = new Date().getHours();
     if (h < 11) return 'Guten Morgen';
@@ -670,36 +730,62 @@ function HomeScreen({ onSelectGroup, onFreeTraining }) {
         </div>
       </div>
 
-      <button
-        onClick={onFreeTraining}
-        className="w-full rounded-2xl text-left active:scale-95 transition-transform mb-8 relative overflow-hidden"
-        style={{
-          background: '#fafafa',
-          padding: '18px 18px',
-          display: 'flex', alignItems: 'center', gap: 16,
-        }}
-      >
-        <div style={{
-          width: 56, height: 56, borderRadius: 16,
-          background: '#0a0a0a',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          flexShrink: 0,
-        }}>
-          <Shuffle size={26} color="#D4FF00" />
-        </div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontFamily: 'Manrope, sans-serif', fontSize: 10, fontWeight: 700, letterSpacing: '0.18em', color: '#666' }}>
+      {/* Two CTAs: Free Training + Random Mix */}
+      <div className="grid grid-cols-2 gap-3 mb-8">
+        <button
+          onClick={onFreeTraining}
+          className="rounded-2xl text-left active:scale-95 transition-transform"
+          style={{
+            background: '#fafafa',
+            padding: '16px 14px',
+          }}
+        >
+          <div style={{
+            width: 40, height: 40, borderRadius: 12,
+            background: '#0a0a0a',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            marginBottom: 10,
+          }}>
+            <Shuffle size={20} color="#D4FF00" />
+          </div>
+          <div style={{ fontFamily: 'Manrope, sans-serif', fontSize: 9, fontWeight: 700, letterSpacing: '0.18em', color: '#666' }}>
             INDIVIDUELL
           </div>
-          <div style={{ fontFamily: 'Anton, sans-serif', fontSize: 22, color: '#0a0a0a', lineHeight: 1.05, letterSpacing: '0.01em' }}>
+          <div style={{ fontFamily: 'Anton, sans-serif', fontSize: 18, color: '#0a0a0a', lineHeight: 1.05, letterSpacing: '0.01em', marginTop: 2 }}>
             FREIES TRAINING
           </div>
-          <div style={{ fontFamily: 'Manrope, sans-serif', fontSize: 12, color: '#666', marginTop: 4 }}>
-            Übungen suchen, mischen, eigene Session bauen
+          <div style={{ fontFamily: 'Manrope, sans-serif', fontSize: 11, color: '#666', marginTop: 4, lineHeight: 1.3 }}>
+            Übungen suchen & mischen
           </div>
-        </div>
-        <ChevronRight size={20} color="#0a0a0a" />
-      </button>
+        </button>
+
+        <button
+          onClick={onRandomMix}
+          className="rounded-2xl text-left active:scale-95 transition-transform relative overflow-hidden"
+          style={{
+            background: 'linear-gradient(135deg, #D4FF00 0%, #95E1D3 100%)',
+            padding: '16px 14px',
+          }}
+        >
+          <div style={{
+            width: 40, height: 40, borderRadius: 12,
+            background: '#0a0a0a',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            marginBottom: 10,
+          }}>
+            <Sparkles size={20} color="#D4FF00" />
+          </div>
+          <div style={{ fontFamily: 'Manrope, sans-serif', fontSize: 9, fontWeight: 700, letterSpacing: '0.18em', color: '#0a0a0a', opacity: 0.7 }}>
+            ZUFÄLLIG
+          </div>
+          <div style={{ fontFamily: 'Anton, sans-serif', fontSize: 18, color: '#0a0a0a', lineHeight: 1.05, letterSpacing: '0.01em', marginTop: 2 }}>
+            RANDOM MIX
+          </div>
+          <div style={{ fontFamily: 'Manrope, sans-serif', fontSize: 11, color: '#0a0a0a', opacity: 0.7, marginTop: 4, lineHeight: 1.3 }}>
+            Schwerpunkte setzen
+          </div>
+        </button>
+      </div>
 
       <div className="flex items-baseline justify-between mb-4">
         <h2 style={{ fontFamily: 'Anton, sans-serif', fontSize: 22, color: '#fafafa', letterSpacing: '0.02em' }}>
@@ -929,7 +1015,7 @@ function GroupScreen({ group, onStart, onBack }) {
 // FREE TRAINING — search and pick exercises
 // ====================================================================
 
-function FreeTrainingScreen({ onStart, onBack }) {
+function FreeTrainingScreen({ onStart, onBack, onRandomMix }) {
   const [query, setQuery] = useState('');
   const [activeFilter, setActiveFilter] = useState(null);
   const [picked, setPicked] = useState([]);
@@ -973,25 +1059,42 @@ function FreeTrainingScreen({ onStart, onBack }) {
   return (
     <div className="pb-40">
       <div className="px-6 pt-8 pb-4">
-        <div className="flex items-center gap-3 mb-6">
+        <div className="flex items-center justify-between gap-3 mb-6">
+          <div className="flex items-center gap-3">
+            <button
+              onClick={onBack}
+              className="rounded-full active:scale-95 transition-transform"
+              style={{
+                width: 40, height: 40, background: '#1a1a1a',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}
+            >
+              <ChevronLeft size={22} color="#fafafa" />
+            </button>
+            <div>
+              <div style={{ fontFamily: 'Manrope, sans-serif', fontSize: 11, fontWeight: 700, letterSpacing: '0.22em', color: '#666' }}>
+                INDIVIDUELL
+              </div>
+              <h1 style={{ fontFamily: 'Anton, sans-serif', fontSize: 28, color: '#fafafa', lineHeight: 1, letterSpacing: '0.01em', marginTop: 2 }}>
+                FREIES TRAINING
+              </h1>
+            </div>
+          </div>
           <button
-            onClick={onBack}
-            className="rounded-full active:scale-95 transition-transform"
+            onClick={onRandomMix}
+            className="rounded-full active:scale-95 transition-transform flex items-center gap-2"
             style={{
-              width: 40, height: 40, background: '#1a1a1a',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              background: '#D4FF00', color: '#0a0a0a',
+              padding: '8px 14px',
+              fontFamily: 'Manrope, sans-serif',
+              fontSize: 11,
+              fontWeight: 700,
+              letterSpacing: '0.1em',
             }}
           >
-            <ChevronLeft size={22} color="#fafafa" />
+            <Sparkles size={14} />
+            RANDOM
           </button>
-          <div>
-            <div style={{ fontFamily: 'Manrope, sans-serif', fontSize: 11, fontWeight: 700, letterSpacing: '0.22em', color: '#666' }}>
-              INDIVIDUELL
-            </div>
-            <h1 style={{ fontFamily: 'Anton, sans-serif', fontSize: 28, color: '#fafafa', lineHeight: 1, letterSpacing: '0.01em', marginTop: 2 }}>
-              FREIES TRAINING
-            </h1>
-          </div>
         </div>
 
         <div
@@ -1187,6 +1290,310 @@ function FreeTrainingScreen({ onStart, onBack }) {
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+// ====================================================================
+// RANDOM MIX — auto-balanced sliders, choose count, generate session
+// ====================================================================
+
+function RandomMixScreen({ onStart, onBack }) {
+  const initialEqual = 100 / muscleGroups.length;
+  const [weights, setWeights] = useState(() => {
+    const w = {};
+    muscleGroups.forEach((g) => { w[g.id] = initialEqual; });
+    return w;
+  });
+  const [totalCount, setTotalCount] = useState(8);
+  const [previewSeed, setPreviewSeed] = useState(0);
+
+  const updateWeight = (key, value) => {
+    setWeights((curr) => rebalanceWeights(curr, key, value));
+  };
+
+  const resetEqual = () => {
+    const w = {};
+    muscleGroups.forEach((g) => { w[g.id] = initialEqual; });
+    setWeights(w);
+  };
+
+  // Live preview of how many exercises per group at current weights
+  const previewCounts = useMemo(() => {
+    const raw = {};
+    const floors = {};
+    let assigned = 0;
+    for (const g of muscleGroups) {
+      raw[g.id] = (weights[g.id] * totalCount) / 100;
+      floors[g.id] = Math.floor(raw[g.id]);
+      assigned += floors[g.id];
+    }
+    let remaining = totalCount - assigned;
+    if (remaining > 0) {
+      const sorted = muscleGroups
+        .map((g) => ({ id: g.id, frac: raw[g.id] - floors[g.id] }))
+        .sort((a, b) => b.frac - a.frac);
+      for (let i = 0; i < remaining && i < sorted.length; i++) {
+        floors[sorted[i].id] += 1;
+      }
+    }
+    return floors;
+  }, [weights, totalCount]);
+
+  const handleStart = () => {
+    const picked = generateMix(weights, totalCount);
+    if (picked.length === 0) return;
+    const expanded = expandExercises(picked);
+    onStart(expanded, { color: '#D4FF00', tag: 'Random', short: 'Mein Mix' });
+  };
+
+  const totalSec = useMemo(() => {
+    // estimate: avg 50s per exercise, doubled for "beidseitig"
+    let sec = 0;
+    for (const g of muscleGroups) {
+      const need = previewCounts[g.id] || 0;
+      if (!need) continue;
+      const sample = g.exercises.slice(0, need);
+      sec += sample.reduce((s, e) => s + (e.side === 'beidseitig' ? e.duration * 2 : e.duration), 0);
+    }
+    return sec;
+  }, [previewCounts]);
+
+  const counts = [5, 8, 12];
+
+  return (
+    <div className="pb-40">
+      <style>{`
+        .flex-slider {
+          -webkit-appearance: none;
+          appearance: none;
+          width: 100%;
+          height: 6px;
+          border-radius: 3px;
+          background: #1a1a1a;
+          outline: none;
+          cursor: pointer;
+        }
+        .flex-slider::-webkit-slider-thumb {
+          -webkit-appearance: none;
+          appearance: none;
+          width: 26px;
+          height: 26px;
+          border-radius: 50%;
+          background: var(--thumb-color, #D4FF00);
+          cursor: pointer;
+          border: 3px solid #0a0a0a;
+          box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+          transition: transform 0.15s ease;
+        }
+        .flex-slider::-webkit-slider-thumb:active {
+          transform: scale(1.15);
+        }
+        .flex-slider::-moz-range-thumb {
+          width: 26px;
+          height: 26px;
+          border-radius: 50%;
+          background: var(--thumb-color, #D4FF00);
+          cursor: pointer;
+          border: 3px solid #0a0a0a;
+        }
+      `}</style>
+
+      <div className="px-6 pt-8 pb-4">
+        <div className="flex items-center justify-between gap-3 mb-6">
+          <div className="flex items-center gap-3">
+            <button
+              onClick={onBack}
+              className="rounded-full active:scale-95 transition-transform"
+              style={{
+                width: 40, height: 40, background: '#1a1a1a',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}
+            >
+              <ChevronLeft size={22} color="#fafafa" />
+            </button>
+            <div>
+              <div style={{ fontFamily: 'Manrope, sans-serif', fontSize: 11, fontWeight: 700, letterSpacing: '0.22em', color: '#666' }}>
+                ZUFÄLLIG
+              </div>
+              <h1 style={{ fontFamily: 'Anton, sans-serif', fontSize: 28, color: '#fafafa', lineHeight: 1, letterSpacing: '0.01em', marginTop: 2 }}>
+                RANDOM MIX
+              </h1>
+            </div>
+          </div>
+          <button
+            onClick={resetEqual}
+            className="rounded-full active:scale-95 transition-transform"
+            style={{
+              background: '#1a1a1a',
+              padding: '8px 14px',
+              fontFamily: 'Manrope, sans-serif',
+              fontSize: 11,
+              fontWeight: 700,
+              letterSpacing: '0.1em',
+              color: '#999',
+              display: 'flex', alignItems: 'center', gap: 6,
+            }}
+          >
+            <RefreshCw size={12} />
+            RESET
+          </button>
+        </div>
+
+        <p style={{
+          fontFamily: 'Manrope, sans-serif', fontSize: 13, color: '#888',
+          lineHeight: 1.5, marginBottom: 18,
+        }}>
+          Setz Schwerpunkte mit den Slidern. Ändert sich einer, passen sich
+          die anderen automatisch an, damit die Summe 100% bleibt.
+        </p>
+      </div>
+
+      {/* count selector */}
+      <div className="px-6 mb-6">
+        <div style={{ fontFamily: 'Manrope, sans-serif', fontSize: 11, fontWeight: 700, letterSpacing: '0.18em', color: '#666', marginBottom: 10 }}>
+          ANZAHL ÜBUNGEN
+        </div>
+        <div className="grid grid-cols-3 gap-2">
+          {counts.map((c) => {
+            const on = totalCount === c;
+            return (
+              <button
+                key={c}
+                onClick={() => setTotalCount(c)}
+                className="rounded-xl active:scale-95 transition-transform"
+                style={{
+                  background: on ? '#D4FF00' : '#161616',
+                  color: on ? '#0a0a0a' : '#999',
+                  border: `1px solid ${on ? '#D4FF00' : '#222'}`,
+                  padding: '12px 0',
+                  fontFamily: 'Anton, sans-serif',
+                  fontSize: 22,
+                  letterSpacing: '0.05em',
+                }}
+              >
+                {c}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* sliders */}
+      <div className="px-6">
+        <div className="flex items-baseline justify-between mb-3">
+          <div style={{ fontFamily: 'Manrope, sans-serif', fontSize: 11, fontWeight: 700, letterSpacing: '0.18em', color: '#666' }}>
+            SCHWERPUNKTE
+          </div>
+          <div style={{ fontFamily: 'Manrope, sans-serif', fontSize: 11, color: '#666', letterSpacing: '0.1em' }}>
+            Σ {Math.round(Object.values(weights).reduce((a, b) => a + b, 0))}%
+          </div>
+        </div>
+
+        <div className="space-y-4">
+          {muscleGroups.map((g) => {
+            const pct = weights[g.id] || 0;
+            const cnt = previewCounts[g.id] || 0;
+            return (
+              <div
+                key={g.id}
+                className="rounded-2xl px-4 py-3"
+                style={{ background: '#141414', border: '1px solid #1f1f1f' }}
+              >
+                <div className="flex items-center justify-between mb-2.5">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div style={{
+                      width: 30, height: 30, borderRadius: 8,
+                      background: g.color + '20',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      flexShrink: 0,
+                    }}>
+                      <Pose name={g.exercises[0].pose} color="#fafafa" accent={g.color} size={26} />
+                    </div>
+                    <div style={{
+                      fontFamily: 'Manrope, sans-serif',
+                      fontSize: 13, fontWeight: 700,
+                      color: '#fafafa',
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                    }}>
+                      {g.short}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    {cnt > 0 && (
+                      <div style={{
+                        background: g.color + '25',
+                        color: g.color,
+                        padding: '2px 8px',
+                        borderRadius: 999,
+                        fontFamily: 'Manrope, sans-serif',
+                        fontSize: 10,
+                        fontWeight: 700,
+                        letterSpacing: '0.05em',
+                      }}>
+                        {cnt}×
+                      </div>
+                    )}
+                    <div style={{
+                      fontFamily: 'Anton, sans-serif',
+                      fontSize: 18,
+                      color: pct > 0 ? g.color : '#444',
+                      letterSpacing: '0.02em',
+                      minWidth: 44, textAlign: 'right',
+                    }}>
+                      {Math.round(pct)}%
+                    </div>
+                  </div>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="1"
+                  value={Math.round(pct)}
+                  onChange={(e) => updateWeight(g.id, parseFloat(e.target.value))}
+                  className="flex-slider"
+                  style={{
+                    '--thumb-color': g.color,
+                    background: `linear-gradient(to right, ${g.color} 0%, ${g.color} ${pct}%, #1a1a1a ${pct}%, #1a1a1a 100%)`,
+                  }}
+                />
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* sticky bottom CTA */}
+      <div
+        className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full px-6 pb-6 pt-4"
+        style={{
+          maxWidth: 460,
+          background: 'linear-gradient(to top, #0a0a0a 70%, rgba(10,10,10,0))',
+        }}
+      >
+        <div className="flex items-center justify-between mb-2 px-1">
+          <span style={{ fontFamily: 'Manrope, sans-serif', fontSize: 11, color: '#888', letterSpacing: '0.15em' }}>
+            {totalCount} ÜBUNGEN · ~{Math.max(1, Math.round(totalSec / 60))} MIN
+          </span>
+        </div>
+        <button
+          onClick={handleStart}
+          className="w-full rounded-2xl active:scale-95 transition-transform"
+          style={{
+            background: '#D4FF00', color: '#0a0a0a',
+            padding: '18px',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
+            fontFamily: 'Anton, sans-serif',
+            fontSize: 22,
+            letterSpacing: '0.08em',
+          }}
+        >
+          <Sparkles size={20} /> MIX GENERIEREN
+        </button>
+      </div>
     </div>
   );
 }
@@ -1549,6 +1956,7 @@ export default function App() {
             <HomeScreen
               onSelectGroup={(g) => { setActiveGroup(g); setScreen('group'); }}
               onFreeTraining={() => setScreen('free')}
+              onRandomMix={() => setScreen('random')}
             />
           )}
           {screen === 'group' && activeGroup && (
@@ -1560,6 +1968,13 @@ export default function App() {
           )}
           {screen === 'free' && (
             <FreeTrainingScreen
+              onStart={startSession}
+              onBack={() => setScreen('home')}
+              onRandomMix={() => setScreen('random')}
+            />
+          )}
+          {screen === 'random' && (
+            <RandomMixScreen
               onStart={startSession}
               onBack={() => setScreen('home')}
             />
